@@ -1,0 +1,135 @@
+name: RSI Divergence Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      exchange:
+        description: "Exchange to download data from"
+        type: choice
+        options: [mexc, gate]
+        default: mexc
+      interval:
+        description: "Candle size to download (Gate 5m = only ~34 days; use 1h for ~1 year)"
+        type: choice
+        options: [5m, 15m, 1h, 4h, 1d]
+        default: 5m
+      symbols:
+        description: "Comma separated pairs (BASE_QUOTE)"
+        type: string
+        default: "BTC_USDT,ETH_USDT,SOL_USDT,XRP_USDT,BNB_USDT"
+      days:
+        description: "Days of history to download"
+        type: string
+        default: "365"
+      timeframes:
+        description: "Timeframes to test (must be >= the downloaded candle size)"
+        type: string
+        default: "5m,15m,1h,4h,1d,1w"
+      targets:
+        description: "Take-profit % list, each tested separately"
+        type: string
+        default: "1,2,3,4,5,6,7,8,9,10"
+      stoploss:
+        description: "Stop loss: on, off, or both (compare)"
+        type: choice
+        options: [both, on, off]
+        default: both
+      sl_type:
+        description: "swing = beyond divergence high/low + buffer; atr; pct"
+        type: choice
+        options: [swing, atr, pct]
+        default: swing
+      sl_max:
+        description: "Max stop-loss distance in % (swing/atr)"
+        type: string
+        default: "5"
+      margin_inr:
+        description: "Margin per trade in Rs"
+        type: string
+        default: "1000"
+      leverages:
+        description: "Leverage scenarios, comma separated"
+        type: string
+        default: "5,10"
+      fee_pct:
+        description: "Fee per side in % of position"
+        type: string
+        default: "0.02"
+      slip_pct:
+        description: "Slippage per side in %"
+        type: string
+        default: "0.02"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate scripts in repo
+        run: |
+          echo "Files in this repo:"
+          find . -path ./.git -prune -o -type f -print | head -50
+          missing=""
+          for f in fetch_data.py rsi_divergence_backtest.py; do
+            p=$(find . -path ./.git -prune -o -type f -name "$f" -print | head -1)
+            if [ -z "$p" ]; then
+              echo "ERROR: $f is NOT in this repo. Upload it (Add file > Upload files), commit, then start a NEW run with 'Run workflow' (do not use 'Re-run')."
+              missing=1
+            elif [ "$p" != "./$f" ]; then
+              echo "Found $f at $p -> copying to repo root"
+              cp "$p" "./$f"
+            fi
+          done
+          if [ -n "$missing" ]; then exit 1; fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas numpy requests matplotlib
+
+      - name: Download data
+        env:
+          EXCHANGE: ${{ inputs.exchange }}
+          INTERVAL: ${{ inputs.interval }}
+          SYMBOLS: ${{ inputs.symbols }}
+          DAYS: ${{ inputs.days }}
+        run: python fetch_data.py --exchange "$EXCHANGE" --interval "$INTERVAL" --symbols "$SYMBOLS" --days "$DAYS" --out data
+
+      - name: Run RSI divergence backtest
+        env:
+          TFS: ${{ inputs.timeframes }}
+          TARGETS: ${{ inputs.targets }}
+          STOPLOSS: ${{ inputs.stoploss }}
+          SL_TYPE: ${{ inputs.sl_type }}
+          SL_MAX: ${{ inputs.sl_max }}
+          MARGIN: ${{ inputs.margin_inr }}
+          LEVS: ${{ inputs.leverages }}
+          FEE: ${{ inputs.fee_pct }}
+          SLIP: ${{ inputs.slip_pct }}
+        run: python rsi_divergence_backtest.py --data data --out results_rsi --tfs "$TFS" --targets "$TARGETS" --stoploss "$STOPLOSS" --sl-type "$SL_TYPE" --sl-max "$SL_MAX" --margin "$MARGIN" --leverages "$LEVS" --fee "$FEE" --slip "$SLIP" | tee results_console.txt
+
+      - name: Show summary in run page
+        if: always()
+        run: |
+          if [ -f results_console.txt ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -c 60000 results_console.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsi-divergence-results
+          path: |
+            results_rsi/
+            results_console.txt
+          if-no-files-found: warn
